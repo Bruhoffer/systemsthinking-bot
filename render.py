@@ -90,45 +90,4 @@ def render_cld(
             arrowsize="0.9",
         )
 
-    # Render feedback loop annotations
-    if loops:
-        for loop in loops:
-            if isinstance(loop, dict):
-                loop = FeedbackLoop(**loop)
-
-            if loop.loop_type == "reinforcing":
-                loop_color = "#16a34a"  # green
-                prefix = "R"
-            else:
-                loop_color = "#dc2626"
-                prefix = "B"
-
-            label = f"{prefix}: {loop.name}"
-
-            # Add the loop label as an invisible node positioned near the cycle
-            node_id = f"loop_{loop.name}"
-            dot.node(
-                node_id,
-                label,
-                shape="oval",
-                style="filled",
-                fillcolor="#ffffffcc",
-                fontcolor=loop_color,
-                fontsize="13",
-                fontname="Helvetica-Bold",
-                color=loop_color,
-                penwidth="1.5",
-            )
-
-            # Connect loop label to the first variable in the cycle (invisible edge)
-            if loop.variable_sequence:
-                dot.edge(
-                    node_id,
-                    loop.variable_sequence[0],
-                    style="dotted",
-                    color="#cccccc",
-                    arrowhead="none",
-                    penwidth="0.5",
-                )
-
     return dot

@@ -20,7 +20,7 @@ def _get_conn():
     url = os.getenv("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL not set in .env")
-    return psycopg2.connect(url)
+    return psycopg2.connect(url, connect_timeout=5)
 
 
 def init_session(student_id: str) -> str:

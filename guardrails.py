@@ -2,16 +2,69 @@
 
 from models import CausalLink, FeedbackLoop, TutorResponse
 
+# Canonical loop names keyed by the minimum set of variables that uniquely
+# identify each loop (case-insensitive). First match wins.
+_CANONICAL_LOOPS: list[tuple[str, str, set[str]]] = [
+    ("B1", "balancing", {
+        "malaria incidence", "ddt spraying level", "mosquito population",
+    }),
+    ("B2", "balancing", {
+        "parasitic wasp population", "thatch-eating caterpillar population",
+    }),
+    ("B3", "balancing", {
+        "ddt accumulated insects", "ddt accumulated geckos",
+    }),
+    # B5 must come before B4 — it is a superset of B4's vars plus grain shortages
+    ("B5", "balancing", {
+        "cat population", "rat population", "grain shortages", "cat parachute drops",
+    }),
+    ("B4", "balancing", {
+        "cat population", "rat population",
+    }),
+    ("R1", "reinforcing", {
+        "ddt accumulated geckos", "cat population",
+    }),
+]
+
+
+def _canonical_loop_name(loop: FeedbackLoop, existing_loops: list[dict]) -> str:
+    """Return the canonical label (B1–B5, R1) for a loop, or next available Bx/Rx."""
+    used_names = {l.get("name", "").upper() for l in existing_loops}
+    seq_set = {v.lower() for v in loop.variable_sequence}
+
+    for name, _, key_vars in _CANONICAL_LOOPS:
+        if name in used_names:
+            continue
+        if key_vars.issubset(seq_set):
+            return name
+
+    # Fallback: next available label
+    prefix = "R" if loop.loop_type == "reinforcing" else "B"
+    n = 1
+    while f"{prefix}{n}" in used_names:
+        n += 1
+    return f"{prefix}{n}"
+
 
 def is_duplicate_variable(new_var: str, existing_vars: list[str]) -> bool:
     """Check if a variable already exists (case-insensitive)."""
     return new_var.strip().lower() in {v.lower() for v in existing_vars}
 
 
+def is_duplicate_link(link: CausalLink, existing_links: list[dict]) -> bool:
+    """Check if an identical (source, target) pair already exists (case-insensitive)."""
+    src = link.source.strip().lower()
+    tgt = link.target.strip().lower()
+    return any(
+        l.get("source", "").lower() == src and l.get("target", "").lower() == tgt
+        for l in existing_links
+    )
+
+
 def validate_link(
-    link: CausalLink, existing_vars: list[str]
+    link: CausalLink, existing_vars: list[str], existing_links: list[dict]
 ) -> tuple[bool, str | None]:
-    """Validate that both source and target exist in approved variables."""
+    """Validate that both source and target exist and the link is not a duplicate."""
     var_set = {v.lower() for v in existing_vars}
     missing = []
 
@@ -25,6 +78,13 @@ def validate_link(
             f"Error: Attempted to link undefined variable(s): "
             f"{', '.join(missing)}. Prompt the student to define them first."
         )
+
+    if is_duplicate_link(link, existing_links):
+        return False, (
+            f"Error: Link from '{link.source}' to '{link.target}' already exists. "
+            "Do not re-draw it. Acknowledge it and continue."
+        )
+
     return True, None
 
 
@@ -89,9 +149,9 @@ def apply_tutor_response(
         else:
             variables.append(var.strip())
 
-    # Process links (source/target must exist in variables)
+    # Process links (source/target must exist in variables; no duplicates)
     for link in response.extracted_links:
-        is_valid, error_msg = validate_link(link, variables)
+        is_valid, error_msg = validate_link(link, variables, links)
         if not is_valid:
             errors.append(error_msg)
         else:
@@ -112,6 +172,8 @@ def apply_tutor_response(
         if not is_valid:
             errors.append(error_msg)
         else:
+            canonical_name = _canonical_loop_name(loop, loops)
+            loop = loop.model_copy(update={"name": canonical_name})
             loops.append(loop.model_dump())
 
     return errors
