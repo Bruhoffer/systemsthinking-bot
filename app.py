@@ -1,12 +1,16 @@
 """Socratic ST/SD Tutor — Streamlit entry point."""
 
+import html as html_lib
 import streamlit as st
 
 from models import CASE_STUDY
 from render import render_cld
 from guardrails import apply_tutor_response
 from llm import get_tutor_response
-from logger import init_session, log_turn
+import threading
+from logger import init_session, log_turn, get_latest_session, load_session_state, save_pre_assessment, save_pre_assessment_raw, save_session_outcome, save_session_transcript, save_quiz_results
+from assess import get_pre_assessment_extraction, score_assessment
+from quiz import QUESTIONS, TOTAL_QUESTIONS
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -178,46 +182,320 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = None
 if "student_id" not in st.session_state:
     st.session_state.student_id = None
+if "_pending_student_id" not in st.session_state:
+    st.session_state._pending_student_id = None
+if "resume_candidate" not in st.session_state:
+    st.session_state.resume_candidate = None  # None=unchecked, False=no prior, dict=found
+if "phase" not in st.session_state:
+    st.session_state.phase = "pre_assessment"  # pre_assessment | tutoring | quiz
+if "quiz_question_idx" not in st.session_state:
+    st.session_state.quiz_question_idx = 0
+if "quiz_answers" not in st.session_state:
+    st.session_state.quiz_answers = {}  # {question_idx: answer_idx}
+if "quiz_saved" not in st.session_state:
+    st.session_state.quiz_saved = False
 
 # ── Student ID gate — must enter before chatting ─────────────────────────────
 if not st.session_state.student_id or not st.session_state.session_id:
     st.title("Socratic ST/SD Tutor")
-    st.markdown("Enter your student ID to begin.")
-    with st.form("student_id_form"):
-        sid = st.text_input("Student ID (e.g. A0123456X)")
-        submitted = st.form_submit_button("Start Session")
-    if submitted and sid.strip():
-        try:
-            session_id = init_session(sid.strip())
-            st.session_state.student_id = sid.strip()
-            st.session_state.session_id = session_id
-            st.rerun()
-        except Exception as e:
-            st.error(f"Could not connect to database: {e}")
+
+    # Phase 1: collect student ID
+    if st.session_state.resume_candidate is None:
+        st.markdown("Enter your student ID to begin.")
+        with st.form("student_id_form"):
+            sid = st.text_input("Student ID (e.g. A0123456X)")
+            submitted = st.form_submit_button("Start Session")
+        if submitted and sid.strip():
+            try:
+                candidate = get_latest_session(sid.strip())
+                st.session_state._pending_student_id = sid.strip()
+                if candidate:
+                    st.session_state.resume_candidate = candidate
+                else:
+                    # No prior session — create one immediately
+                    session_id = init_session(sid.strip())
+                    st.session_state.student_id = sid.strip()
+                    st.session_state.session_id = session_id
+                    st.session_state.resume_candidate = False
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not connect to database: {e}")
+
+    # Phase 2: prior session found — ask what to do
+    elif isinstance(st.session_state.resume_candidate, dict):
+        candidate = st.session_state.resume_candidate
+        sid = st.session_state._pending_student_id
+        last_seen = candidate.get("last_active")
+        last_seen_str = str(last_seen)[:16] if last_seen else "unknown"
+        st.info(f"A previous session was found for **{sid}** (last active: {last_seen_str}).")
+        col_r, col_n = st.columns(2)
+        with col_r:
+            if st.button("Resume last session", type="primary", use_container_width=True):
+                try:
+                    state = load_session_state(candidate["id"])
+                    st.session_state.student_id = sid
+                    st.session_state.session_id = candidate["id"]
+                    st.session_state.messages = state["messages"]
+                    st.session_state.variables = state["variables"]
+                    st.session_state.links = state["links"]
+                    st.session_state.loops = state["loops"]
+                    st.session_state.resume_candidate = False
+                    st.session_state.phase = "tutoring"  # skip pre-assessment
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not load session: {e}")
+        with col_n:
+            if st.button("Start new session", use_container_width=True):
+                try:
+                    session_id = init_session(sid)
+                    st.session_state.student_id = sid
+                    st.session_state.session_id = session_id
+                    st.session_state.resume_candidate = False
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not start new session: {e}")
+
     st.stop()
+
+# ── Pre-assessment phase ──────────────────────────────────────────────────────
+if st.session_state.phase == "pre_assessment":
+    st.title("Socratic ST/SD Tutor")
+    st.markdown(
+        f'<div class="case-study-bar">'
+        f'<span class="cs-title">Case Study — Operation Cat Drop (Borneo)</span>'
+        f'{CASE_STUDY}</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("### Before we begin — map the system yourself")
+    st.markdown(
+        "Read the case study above. Before the tutor guides you, take a few minutes "
+        "to describe what you think the **key variables** are and how they **connect**. "
+        "What causes what? Are there any feedback loops?\n\n"
+        "_There are no right or wrong answers — this is just your starting mental model._"
+    )
+
+    pre_text = st.text_area(
+        "Your response",
+        height=180,
+        placeholder=(
+            "e.g. DDT spraying reduces the mosquito population, which reduces malaria. "
+            "But DDT also kills parasitic wasps, which allows caterpillars to grow..."
+        ),
+        key="pre_assessment_input",
+    )
+
+    btn_col1, btn_col2, _ = st.columns([1.8, 1.2, 3])
+    with btn_col1:
+        submit_pressed = st.button(
+            "Submit & start guided session",
+            type="primary",
+            use_container_width=True,
+        )
+    with btn_col2:
+        skip_pressed = st.button(
+            "Skip →",
+            use_container_width=True,
+            help="Skip straight to the Socratic guided session.",
+        )
+
+    if submit_pressed:
+        if not pre_text.strip():
+            st.warning("Please write something before submitting, or click Skip.")
+        else:
+            session_id = st.session_state.session_id
+            text = pre_text.strip()
+
+            # Save raw text immediately — doesn't wait for LLM
+            try:
+                save_pre_assessment_raw(session_id, text)
+            except Exception:
+                pass
+
+            # Fire scoring in background — user goes straight to tutoring
+            def _score_and_save(sid: str, raw: str) -> None:
+                try:
+                    extraction = get_pre_assessment_extraction(raw)
+                    score = score_assessment(
+                        extraction.extracted_variables,
+                        [lp.model_dump() for lp in extraction.extracted_loops],
+                    )
+                    save_pre_assessment(sid, score, raw)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_score_and_save, args=(session_id, text), daemon=True).start()
+
+            st.session_state.phase = "tutoring"
+            st.rerun()
+
+    if skip_pressed:
+        # Save whatever they typed (if anything) — no LLM scoring on skip
+        if pre_text.strip():
+            try:
+                save_pre_assessment_raw(st.session_state.session_id, pre_text.strip())
+            except Exception:
+                pass
+        st.session_state.phase = "tutoring"
+        st.rerun()
+
+    st.stop()
+
+# ── Quiz phase ────────────────────────────────────────────────────────────────
+if st.session_state.phase == "quiz":
+    st.title("What did we learn? — The 'Fixes that Fail' Archetype")
+
+    idx = st.session_state.quiz_question_idx
+
+    if idx >= TOTAL_QUESTIONS:
+        # ── Final results screen ──────────────────────────────────────────────
+        correct = sum(
+            1
+            for q_idx, ans in st.session_state.quiz_answers.items()
+            if ans == QUESTIONS[q_idx]["answer"]
+        )
+
+        if not st.session_state.quiz_saved:
+            try:
+                answer_log = [
+                    {
+                        "question": QUESTIONS[q_idx]["question"],
+                        "selected": QUESTIONS[q_idx]["options"][ans],
+                        "correct_answer": QUESTIONS[q_idx]["options"][QUESTIONS[q_idx]["answer"]],
+                        "is_correct": ans == QUESTIONS[q_idx]["answer"],
+                    }
+                    for q_idx, ans in st.session_state.quiz_answers.items()
+                ]
+                save_quiz_results(
+                    st.session_state.session_id,
+                    {"score": correct, "total": TOTAL_QUESTIONS, "answers": answer_log},
+                )
+                st.session_state.quiz_saved = True
+            except Exception:
+                pass
+        if correct == TOTAL_QUESTIONS:
+            st.success(f"Perfect score — {correct}/{TOTAL_QUESTIONS}!")
+        elif correct >= TOTAL_QUESTIONS - 1:
+            st.success(f"Great work — {correct}/{TOTAL_QUESTIONS} correct.")
+        else:
+            st.info(f"Quiz complete — {correct}/{TOTAL_QUESTIONS} correct.")
+
+        st.markdown(
+            "### Key Takeaway\n"
+            "The **'Fixes that Fail'** archetype warns us that interventions targeting "
+            "*symptoms* rather than *root causes* often generate delayed side-effects "
+            "that worsen the original problem — sometimes far more severely than if "
+            "nothing had been done at all.\n\n"
+            "In the Borneo case, DDT was the fix. The interconnected food chains created "
+            "multiple long-delay balancing loops that routed back to human health crises: "
+            "roof collapses, cat deaths, rat explosions, and plague. The fix appeared to "
+            "work precisely because the side-effects were slow and invisible.\n\n"
+            "**The antidote:** map the full system before acting. Trace every balancing "
+            "loop your intervention might activate — especially the ones with long delays."
+        )
+        if st.button("← Return to my diagram", type="primary"):
+            st.session_state.phase = "tutoring"
+            st.rerun()
+        st.stop()
+
+    # ── Question screen ───────────────────────────────────────────────────────
+    st.progress(idx / TOTAL_QUESTIONS, text=f"Question {idx + 1} of {TOTAL_QUESTIONS}")
+    q = QUESTIONS[idx]
+
+    st.markdown(f"#### Question {idx + 1}")
+    st.markdown(q["question"])
+
+    already_answered = idx in st.session_state.quiz_answers
+
+    selected = st.radio(
+        "Choose your answer:",
+        options=q["options"],
+        key=f"quiz_radio_{idx}",
+        index=None,
+        disabled=already_answered,
+    )
+
+    if not already_answered:
+        if st.button("Submit answer", type="primary", disabled=(selected is None)):
+            st.session_state.quiz_answers[idx] = q["options"].index(selected)
+            st.rerun()
+    else:
+        student_ans = st.session_state.quiz_answers[idx]
+        correct_ans = q["answer"]
+        if student_ans == correct_ans:
+            st.success(f"Correct! ✓")
+        else:
+            st.error(f"Not quite. The correct answer: **{q['options'][correct_ans]}**")
+        st.info(f"**Why:** {q['explanation']}")
+
+        label = "Next question →" if idx < TOTAL_QUESTIONS - 1 else "See results →"
+        if st.button(label, type="primary"):
+            st.session_state.quiz_question_idx += 1
+            st.rerun()
+
+    st.stop()
+
+# Build CLD once — used for display, export, and session-end logging
+cld = render_cld(
+    st.session_state.variables,
+    st.session_state.links,
+    st.session_state.loops,
+)
 
 # ── Top bar: student info + reset ────────────────────────────────────────────
 info_left, info_right = st.columns([5, 1])
 with info_left:
     short_session = str(st.session_state.session_id)[:8] + "..."
+    safe_sid = html_lib.escape(st.session_state.student_id)
+    safe_log_error = html_lib.escape(str(st.session_state.log_error)) if st.session_state.log_error else ""
     st.markdown(
         f'<div class="top-bar">'
         f'<span><span class="label">Student</span>'
-        f'<span class="value">{st.session_state.student_id}</span></span>'
+        f'<span class="value">{safe_sid}</span></span>'
         f'<span><span class="label">Session</span>'
         f'<span class="tag">{short_session}</span></span>'
-        + (f'<span style="color:#f87171;font-size:0.75rem">⚠ Logging error: {st.session_state.log_error}</span>'
-           if st.session_state.log_error else '')
+        + (f'<span style="color:#f87171;font-size:0.75rem">⚠ Logging error: {safe_log_error}</span>'
+           if safe_log_error else '')
         + '</div>',
         unsafe_allow_html=True,
     )
 with info_right:
-    if st.button("Reset session", type="primary"):
-        for key in ["messages", "variables", "links", "loops", "guardrail_errors"]:
-            st.session_state[key] = []
-        st.session_state.session_id = None
-        st.session_state.student_id = None
-        st.rerun()
+    btn_finish, btn_reset = st.columns(2)
+    with btn_finish:
+        if st.button("Finish →", use_container_width=True,
+                     help="End session and go to the archetype quiz"):
+            try:
+                outcome = score_assessment(
+                    st.session_state.variables,
+                    st.session_state.loops,
+                )
+                save_session_outcome(st.session_state.session_id, outcome)
+            except Exception:
+                pass
+            try:
+                transcript_lines = []
+                for m in st.session_state.messages:
+                    role = "You" if m["role"] == "user" else "Tutor"
+                    transcript_lines.append(f"[{role}]\n{m['content']}\n")
+                save_session_transcript(
+                    st.session_state.session_id,
+                    "\n".join(transcript_lines),
+                    cld.source,
+                )
+            except Exception:
+                pass
+            st.session_state.phase = "quiz"
+            st.rerun()
+    with btn_reset:
+        if st.button("Reset", type="primary", use_container_width=True):
+            for key in ["messages", "variables", "links", "loops", "guardrail_errors"]:
+                st.session_state[key] = []
+            st.session_state.session_id = None
+            st.session_state.student_id = None
+            st.session_state.phase = "pre_assessment"
+            st.session_state.quiz_question_idx = 0
+            st.session_state.quiz_answers = {}
+            st.session_state.quiz_saved = False
+            st.rerun()
 
 # ── Case study banner ─────────────────────────────────────────────────────────
 st.markdown(
@@ -229,15 +507,46 @@ st.markdown(
 
 chat_col, cld_col, info_col = st.columns([1, 1.4, 0.6])
 
-# ── Middle column: CLD ───────────────────────────────────────────────────────
+# ── Middle column: CLD + compact export row ──────────────────────────────────
 with cld_col:
     st.subheader("Causal Loop Diagram")
-    cld = render_cld(
-        st.session_state.variables,
-        st.session_state.links,
-        st.session_state.loops,
-    )
     st.graphviz_chart(cld, width="stretch")
+
+    # Compact export row — sits directly under the diagram
+    has_chat = bool(st.session_state.messages)
+    has_cld = bool(st.session_state.variables)
+
+    if has_chat or has_cld:
+        st.markdown(
+            '<p style="font-size:0.68rem;color:#64748b;margin:4px 0 4px;">Export:</p>',
+            unsafe_allow_html=True,
+        )
+        exp_cols = st.columns(2)
+
+        if has_chat:
+            transcript_lines = []
+            for m in st.session_state.messages:
+                role = "You" if m["role"] == "user" else "Tutor"
+                transcript_lines.append(f"[{role}]\n{m['content']}\n")
+            with exp_cols[0]:
+                st.download_button(
+                    "📄 Transcript",
+                    "\n".join(transcript_lines),
+                    file_name=f"transcript_{st.session_state.student_id}.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                )
+
+        if has_cld:
+            with exp_cols[1]:
+                st.download_button(
+                    "🔗 CLD (DOT)",
+                    cld.source,
+                    file_name=f"cld_{st.session_state.student_id}.gv",
+                    mime="text/plain",
+                    use_container_width=True,
+                    help="Open the .gv file at graphviz.online to render it.",
+                )
 
 # ── Right column: variables + loops (fixed width, scrollable) ───────────────
 with info_col:
@@ -248,7 +557,7 @@ with info_col:
             vars_html += (
                 f'<div style="font-size:0.8rem;padding:3px 0;'
                 f'border-bottom:1px solid #e2e8f020;color:#e2e8f0">'
-                f'· {v}</div>'
+                f'· {html_lib.escape(v)}</div>'
             )
     else:
         vars_html = '<div style="font-size:0.78rem;color:#64748b">No variables approved yet.</div>'
@@ -256,10 +565,10 @@ with info_col:
     loops_html = ""
     if st.session_state.loops:
         for lp in st.session_state.loops:
-            name = lp["name"]
-            loop_type = lp["loop_type"].capitalize()
+            name = html_lib.escape(lp["name"])
+            loop_type = html_lib.escape(lp["loop_type"].capitalize())
             seq = lp["variable_sequence"]
-            path = " → ".join(seq) + (f" → {seq[0]}" if seq else "")
+            path = html_lib.escape(" → ".join(seq) + (f" → {seq[0]}" if seq else ""))
             color = "#16a34a" if lp["loop_type"] == "reinforcing" else "#dc2626"
             loops_html += (
                 f'<div style="margin-bottom:8px;padding:7px 9px;'

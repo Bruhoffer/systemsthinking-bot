@@ -66,11 +66,6 @@ def render_cld(
 
         polarity = link.polarity
 
-        # Build the headlabel: polarity sign placed at the arrowhead
-        headlabel = f" {polarity} "
-        if link.has_delay:
-            headlabel += "// "
-
         if polarity == "+":
             color = "#16a34a"  # green
             style = "solid"
@@ -78,16 +73,21 @@ def render_cld(
             color = "#dc2626"  # red
             style = "dashed"
 
-        dot.edge(
-            link.source,
-            link.target,
-            headlabel=headlabel,
-            labeldistance="2.5",
-            color=color,
-            style=style,
-            fontcolor=color,
-            penwidth="1.5",
-            arrowsize="0.9",
-        )
+        edge_kwargs: dict = {
+            "headlabel": f" {polarity} ",
+            "labeldistance": "2.5",
+            "labelfontcolor": color,  # polarity sign colour at arrowhead
+            "color": color,
+            "style": style,
+            "penwidth": "1.5",
+            "arrowsize": "0.9",
+        }
+
+        if link.has_delay:
+            # " // " in the centre of the edge is the standard CLD delay notation
+            edge_kwargs["label"] = " // "
+            edge_kwargs["fontcolor"] = "#94a3b8"  # muted grey for delay marker
+
+        dot.edge(link.source, link.target, **edge_kwargs)
 
     return dot
