@@ -66,7 +66,7 @@ st.markdown(
         border: 1px solid #1e3a5f;
         border-radius: 8px;
         padding: 10px 16px;
-        font-size: 0.81rem;
+        font-size: 0.9rem;
         line-height: 1.6;
         color: #cbd5e1;
         max-height: 100px;
