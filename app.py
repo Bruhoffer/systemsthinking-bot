@@ -469,9 +469,6 @@ if st.session_state.phase == "feedback":
 
     step = st.session_state.feedback_step
     FEEDBACK_TOTAL = 6
-    st.title("Session Feedback")
-    st.progress(step / FEEDBACK_TOTAL, text=f"Question {step + 1} of {FEEDBACK_TOTAL}")
-
     def _save_feedback_now() -> None:
         """Write accumulated feedback_data to DB immediately."""
         data = dict(st.session_state.feedback_data)
@@ -480,6 +477,19 @@ if st.session_state.phase == "feedback":
             save_feedback_partial(st.session_state.session_id, data)
         except Exception:
             pass
+
+    _title_col, _skip_col = st.columns([4, 1])
+    with _title_col:
+        st.title("Session Feedback")
+    with _skip_col:
+        st.write("")  # vertical nudge
+        if st.button("Skip survey →", key="skip_feedback"):
+            if st.session_state.feedback_data:
+                _save_feedback_now()
+            st.session_state.feedback_saved = True
+            st.session_state.phase = "done"
+            st.rerun()
+    st.progress(step / FEEDBACK_TOTAL, text=f"Question {step + 1} of {FEEDBACK_TOTAL}")
 
     _SCALE = ["1 — Not at all", "2 — A little", "3 — Moderately",
               "4 — Quite a lot", "5 — Very much"]
