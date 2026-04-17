@@ -1,6 +1,8 @@
-"""'Fixes that Fail' archetype quiz — questions, answers, and explanations."""
+"""'Fixes that Fail' archetype quiz + Behaviour Over Time (BOT) questions."""
 
-QUESTIONS: list[dict] = [
+# ── Part 1: MCQ (archetype) ──────────────────────────────────────────────────
+
+MCQ_QUESTIONS: list[dict] = [
     {
         "question": (
             "Which of the following best describes the **'Fixes that Fail'** archetype?"
@@ -105,4 +107,68 @@ QUESTIONS: list[dict] = [
     },
 ]
 
-TOTAL_QUESTIONS = len(QUESTIONS)
+TOTAL_MCQ = len(MCQ_QUESTIONS)
+
+# ── Part 2: BOT (Behaviour Over Time) — chat-based ──────────────────────────
+# Each BOT question has a prompt shown to the student and a reference_answer
+# used by the evaluator LLM to judge correctness.
+
+BOT_QUESTIONS: list[dict] = [
+    {
+        "question": (
+            "Right after DDT spraying begins, what do you think happens to "
+            "**Malaria Incidence** over the first few months? Describe the trend."
+        ),
+        "reference_answer": (
+            "Malaria incidence decreases sharply in the short term because DDT kills "
+            "the mosquitoes that transmit malaria. This is the intended effect of the fix."
+        ),
+    },
+    {
+        "question": (
+            "Now think about the **Cat Population**. What happens to it over a "
+            "longer time period (months to years) after DDT spraying? Why?"
+        ),
+        "reference_answer": (
+            "The cat population decreases over time, but with a significant delay. "
+            "DDT bioaccumulates in insects, then in geckos that eat the insects, and "
+            "finally in cats that eat the geckos. The concentrated DDT eventually kills "
+            "the cats. This is a delayed unintended consequence."
+        ),
+    },
+    {
+        "question": (
+            "What happens to the **Rat Population** over time after DDT spraying begins? "
+            "Describe the shape of the curve — does it go up immediately, stay flat, "
+            "or does something else happen?"
+        ),
+        "reference_answer": (
+            "The rat population stays flat (or even slightly decreases) at first, "
+            "then increases sharply after a significant delay. The delay exists because "
+            "the causal chain is long: DDT accumulates in insects → geckos eat insects "
+            "and accumulate DDT → cats eat geckos and die → with cats gone, rats have "
+            "no predator and their population explodes. Each step takes time, so the "
+            "rat population surge happens well after DDT spraying — not immediately. "
+            "This is a classic delayed side-effect."
+        ),
+    },
+    {
+        "question": (
+            "Why does the **Rat Population** increase with a significant delay "
+            "after DDT spraying begins? Trace the causal chain."
+        ),
+        "reference_answer": (
+            "The causal chain: DDT → bioaccumulates in insects → geckos eat insects "
+            "and accumulate DDT → cats eat geckos and die → with cats gone, rat population "
+            "explodes. Each step requires time (bioaccumulation delays), so the rat increase "
+            "happens much later than the initial DDT spraying. This delay is what makes the "
+            "unintended consequence so hard to predict."
+        ),
+    },
+]
+
+TOTAL_BOT = len(BOT_QUESTIONS)
+
+# Legacy aliases for backward compatibility
+QUESTIONS = MCQ_QUESTIONS
+TOTAL_QUESTIONS = TOTAL_MCQ

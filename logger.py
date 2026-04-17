@@ -212,6 +212,24 @@ def save_pre_assessment_raw(session_id: str, raw_text: str) -> None:
         conn.close()
 
 
+def save_feedback(session_id: str, feedback: dict) -> None:
+    """Persist post-session feedback survey to sessions.feedback (jsonb).
+
+    Requires the column to exist:
+        ALTER TABLE sessions ADD COLUMN IF NOT EXISTS feedback jsonb;
+    """
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET feedback = %s WHERE id = %s",
+                (json.dumps(feedback), session_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def log_turn(
     session_id: str,
     turn_number: int,

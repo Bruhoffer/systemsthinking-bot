@@ -34,12 +34,10 @@ def render_cld(
             "ranksep": "1.0",
         },
         node_attr={
-            "shape": "box",
-            "style": "rounded,filled",
-            "fillcolor": "#f0f4ff",
+            "shape": "plaintext",
             "fontname": "Helvetica",
             "fontsize": "11",
-            "color": "#4a6fa5",
+            "fontcolor": "#e2e8f0",
         },
         edge_attr={
             "fontname": "Helvetica",
