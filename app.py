@@ -12,7 +12,8 @@ from llm import evaluate_bot_answer, get_tutor_response
 from logger import (
     init_session,
     log_turn,
-    save_feedback,
+    save_bot_results,
+    save_feedback_partial,
     save_pre_assessment,
     save_pre_assessment_raw,
     save_quiz_results,
@@ -165,8 +166,11 @@ _defaults: dict = {
     "bot_correct": False,     # whether current BOT question is answered correctly
     "bot_evaluating": False,  # whether we're waiting for LLM evaluation
     "bot_attempts": {},       # {question_idx: number_of_attempts}
+    "bot_results": {},        # {question_idx: {question, attempts, correct}} — persisted per Q
     # Feedback state
     "feedback_saved": False,
+    "feedback_data": {},      # accumulated per-step answers — persisted per step
+    "feedback_step": 0,       # which feedback question we're on (0-5)
     # Finish confirmation
     "confirm_finish": False,
     "quiz_started": False,  # True once user has entered the quiz
@@ -280,25 +284,6 @@ if st.session_state.phase == "quiz_mcq":
             for q_idx, ans in st.session_state.quiz_answers.items()
             if ans == MCQ_QUESTIONS[q_idx]["answer"]
         )
-        if not st.session_state.quiz_saved:
-            try:
-                answer_log = [
-                    {
-                        "question": MCQ_QUESTIONS[q_idx]["question"],
-                        "selected": MCQ_QUESTIONS[q_idx]["options"][ans],
-                        "correct_answer": MCQ_QUESTIONS[q_idx]["options"][MCQ_QUESTIONS[q_idx]["answer"]],
-                        "is_correct": ans == MCQ_QUESTIONS[q_idx]["answer"],
-                    }
-                    for q_idx, ans in st.session_state.quiz_answers.items()
-                ]
-                save_quiz_results(
-                    st.session_state.session_id,
-                    {"score": correct, "total": TOTAL_MCQ, "answers": answer_log},
-                )
-                st.session_state.quiz_saved = True
-            except Exception:
-                pass
-
         if correct == TOTAL_MCQ:
             st.success(f"Perfect score — {correct}/{TOTAL_MCQ}!")
         elif correct >= TOTAL_MCQ - 1:
@@ -338,7 +323,26 @@ if st.session_state.phase == "quiz_mcq":
 
     if not already_answered:
         if st.button("Submit answer", type="primary", disabled=(selected is None)):
-            st.session_state.quiz_answers[idx] = q["options"].index(selected)
+            ans_idx = q["options"].index(selected)
+            st.session_state.quiz_answers[idx] = ans_idx
+            # Persist the full answer set so far immediately
+            try:
+                answer_log = [
+                    {
+                        "question": MCQ_QUESTIONS[q_idx]["question"],
+                        "selected": MCQ_QUESTIONS[q_idx]["options"][a],
+                        "correct_answer": MCQ_QUESTIONS[q_idx]["options"][MCQ_QUESTIONS[q_idx]["answer"]],
+                        "is_correct": a == MCQ_QUESTIONS[q_idx]["answer"],
+                    }
+                    for q_idx, a in st.session_state.quiz_answers.items()
+                ]
+                correct_so_far = sum(1 for q_idx, a in st.session_state.quiz_answers.items() if a == MCQ_QUESTIONS[q_idx]["answer"])
+                save_quiz_results(
+                    st.session_state.session_id,
+                    {"score": correct_so_far, "total": TOTAL_MCQ, "answers": answer_log},
+                )
+            except Exception:
+                pass
             st.rerun()
     else:
         student_ans = st.session_state.quiz_answers[idx]
@@ -437,6 +441,17 @@ if st.session_state.phase == "quiz_bot":
                 {"role": "assistant", "content": result.feedback}
             )
             st.session_state.bot_correct = result.is_correct
+            if result.is_correct:
+                # Persist this BOT answer immediately
+                st.session_state.bot_results[bot_idx] = {
+                    "question": bot_q["question"],
+                    "attempts": st.session_state.bot_attempts.get(bot_idx, 1),
+                    "correct": True,
+                }
+                try:
+                    save_bot_results(st.session_state.session_id, st.session_state.bot_results)
+                except Exception:
+                    pass
         except Exception as e:
             st.session_state.bot_messages.append(
                 {"role": "assistant", "content": f"Sorry, evaluation failed: {e}. Please try again."}
@@ -446,75 +461,87 @@ if st.session_state.phase == "quiz_bot":
 
     st.stop()
 
-# ── Feedback survey phase ────────────────────────────────────────────────────
+# ── Feedback survey phase (one question per step, each saved immediately) ────
 if st.session_state.phase == "feedback":
     if st.button("← Back to Chat", key="back_feedback"):
         st.session_state.phase = "tutoring"
         st.rerun()
+
+    step = st.session_state.feedback_step
+    FEEDBACK_TOTAL = 6
     st.title("Session Feedback")
-    st.markdown(
-        "Thank you for completing the session! We'd love to hear your thoughts. "
-        "Your feedback helps us improve."
-    )
+    st.progress(step / FEEDBACK_TOTAL, text=f"Question {step + 1} of {FEEDBACK_TOTAL}")
 
-    with st.form("feedback_form"):
-        q1 = st.text_area(
-            "What are your key learning points from this session?",
-            height=100,
-            placeholder="e.g. I learned about feedback loops, unintended consequences...",
-        )
-        q2 = st.radio(
-            "How much did the LLM tutor help you learn?",
-            options=["1 — Not at all", "2 — A little", "3 — Moderately",
-                     "4 — Quite a lot", "5 — Very much"],
-            index=None,
-            horizontal=True,
-        )
-        q3 = st.radio(
-            "Did this help your understanding of Junior Seminar courses?",
-            options=["1 — Not at all", "2 — A little", "3 — Moderately",
-                     "4 — Quite a lot", "5 — Very much"],
-            index=None,
-            horizontal=True,
-        )
-        q4 = st.radio(
-            "Did it help you understand Systems Thinking / System Dynamics fundamentals?",
-            options=["1 — Not at all", "2 — A little", "3 — Moderately",
-                     "4 — Quite a lot", "5 — Very much"],
-            index=None,
-            horizontal=True,
-        )
-        q5 = st.text_area(
-            "What do you think is the strength of this LLM tutor?",
-            height=80,
-            placeholder="e.g. It asked good follow-up questions...",
-        )
-        q6 = st.text_area(
-            "What is something that can be improved?",
-            height=80,
-            placeholder="e.g. Sometimes the hints were too vague...",
-        )
+    def _save_feedback_now() -> None:
+        """Write accumulated feedback_data to DB immediately."""
+        data = dict(st.session_state.feedback_data)
+        data["bot_attempts"] = dict(st.session_state.bot_attempts)
+        try:
+            save_feedback_partial(st.session_state.session_id, data)
+        except Exception:
+            pass
 
-        submitted = st.form_submit_button("Submit Feedback", type="primary")
+    _SCALE = ["1 — Not at all", "2 — A little", "3 — Moderately",
+              "4 — Quite a lot", "5 — Very much"]
 
-    if submitted:
-        if not q2 or not q3 or not q4:
-            st.warning("Please answer all the scale questions before submitting.")
-        else:
-            feedback_data = {
-                "learning_points": q1.strip(),
-                "llm_helpfulness": int(q2[0]) if q2 else None,
-                "junior_seminar_understanding": int(q3[0]) if q3 else None,
-                "sd_fundamentals_understanding": int(q4[0]) if q4 else None,
-                "strength": q5.strip(),
-                "improvement": q6.strip(),
-                "bot_attempts": dict(st.session_state.bot_attempts),
-            }
-            try:
-                save_feedback(st.session_state.session_id, feedback_data)
-                st.session_state.feedback_saved = True
-            except Exception:
-                pass
+    if step == 0:
+        st.markdown("#### What are your key learning points from this session?")
+        val = st.text_area("Your answer", height=120,
+                           placeholder="e.g. I learned about feedback loops, unintended consequences...",
+                           key="fb_0")
+        if st.button("Next →", type="primary", disabled=not val.strip()):
+            st.session_state.feedback_data["learning_points"] = val.strip()
+            _save_feedback_now()
+            st.session_state.feedback_step += 1
+            st.rerun()
+
+    elif step == 1:
+        st.markdown("#### How much did the LLM tutor help you learn?")
+        val = st.radio("", options=_SCALE, index=None, horizontal=True, key="fb_1")
+        if st.button("Next →", type="primary", disabled=val is None):
+            st.session_state.feedback_data["llm_helpfulness"] = int(val[0])
+            _save_feedback_now()
+            st.session_state.feedback_step += 1
+            st.rerun()
+
+    elif step == 2:
+        st.markdown("#### Did this help your understanding of Junior Seminar courses?")
+        val = st.radio("", options=_SCALE, index=None, horizontal=True, key="fb_2")
+        if st.button("Next →", type="primary", disabled=val is None):
+            st.session_state.feedback_data["junior_seminar_understanding"] = int(val[0])
+            _save_feedback_now()
+            st.session_state.feedback_step += 1
+            st.rerun()
+
+    elif step == 3:
+        st.markdown("#### Did it help you understand Systems Thinking / System Dynamics fundamentals?")
+        val = st.radio("", options=_SCALE, index=None, horizontal=True, key="fb_3")
+        if st.button("Next →", type="primary", disabled=val is None):
+            st.session_state.feedback_data["sd_fundamentals_understanding"] = int(val[0])
+            _save_feedback_now()
+            st.session_state.feedback_step += 1
+            st.rerun()
+
+    elif step == 4:
+        st.markdown("#### What do you think is the strength of this LLM tutor?")
+        val = st.text_area("Your answer", height=100,
+                           placeholder="e.g. It asked good follow-up questions...",
+                           key="fb_4")
+        if st.button("Next →", type="primary", disabled=not val.strip()):
+            st.session_state.feedback_data["strength"] = val.strip()
+            _save_feedback_now()
+            st.session_state.feedback_step += 1
+            st.rerun()
+
+    elif step == 5:
+        st.markdown("#### What is something that can be improved?")
+        val = st.text_area("Your answer", height=100,
+                           placeholder="e.g. Sometimes the hints were too vague...",
+                           key="fb_5")
+        if st.button("Submit Feedback", type="primary", disabled=not val.strip()):
+            st.session_state.feedback_data["improvement"] = val.strip()
+            _save_feedback_now()
+            st.session_state.feedback_saved = True
             st.session_state.phase = "done"
             st.rerun()
 
@@ -551,12 +578,13 @@ safe_log_error = html_lib.escape(str(st.session_state.log_error)) if st.session_
 # Single row: session tag (auto-width) | buttons (fixed narrow)
 info_left, info_right = st.columns([1, 2])
 with info_left:
+    safe_student_id = html_lib.escape(st.session_state.student_id)
     st.markdown(
         f'<div style="display:inline-flex;align-items:center;gap:8px;'
         f'background:#1e293b;border-radius:6px;padding:5px 12px;font-size:0.78rem;">'
-        f'<span style="color:#94a3b8">Session</span>'
+        f'<span style="color:#94a3b8">Your ID</span>'
         f'<span style="background:#334155;border-radius:4px;padding:1px 7px;'
-        f'font-family:monospace;font-size:0.73rem;color:#7dd3fc">{short_session}</span>'
+        f'font-family:monospace;font-size:0.73rem;color:#7dd3fc">{safe_student_id}</span>'
         + (f'<span style="color:#f87171;font-size:0.72rem">⚠ {safe_log_error}</span>'
            if safe_log_error else '')
         + '</div>',

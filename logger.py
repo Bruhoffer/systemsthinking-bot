@@ -212,6 +212,49 @@ def save_pre_assessment_raw(session_id: str, raw_text: str) -> None:
         conn.close()
 
 
+def save_bot_results(session_id: str, results: dict) -> None:
+    """Persist BOT question results to sessions.bot_results (jsonb).
+
+    Called progressively after each BOT question is answered correctly.
+    results should be a dict like:
+        {question_idx: {question, final_answer, attempts, correct: True}}
+
+    Requires the column to exist:
+        ALTER TABLE sessions ADD COLUMN IF NOT EXISTS bot_results jsonb;
+    """
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET bot_results = %s WHERE id = %s",
+                (json.dumps(results), session_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_feedback_partial(session_id: str, feedback: dict) -> None:
+    """Persist feedback survey answers progressively (called after each step).
+
+    Overwrites the entire feedback jsonb each time — safe because we always
+    pass the full accumulated dict from session state.
+
+    Requires the column to exist:
+        ALTER TABLE sessions ADD COLUMN IF NOT EXISTS feedback jsonb;
+    """
+    conn = _get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET feedback = %s WHERE id = %s",
+                (json.dumps(feedback), session_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def save_feedback(session_id: str, feedback: dict) -> None:
     """Persist post-session feedback survey to sessions.feedback (jsonb).
 
